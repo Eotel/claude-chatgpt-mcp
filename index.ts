@@ -9,6 +9,49 @@ import {
 import { runAppleScript } from 'run-applescript';
 import { run } from '@jxa/run';
 
+const MAX_PROMPT_LENGTH = 10000; // 10KB以内に制限
+const MAX_CONVERSATION_ID_LENGTH = 200; // 適切な長さに制限
+
+/**
+ * Safely escapes a string for use in AppleScript
+ * Uses AppleScript's "quoted form of" to properly escape all special characters
+ */
+function escapeForAppleScript(str: string): string {
+  const safeStr = String(str);
+  return `quoted form of "${safeStr.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * ユーザー入力を検証し、危険な入力を拒否する
+ */
+function validateChatGPTInput(prompt: string, conversationId?: string): void {
+  if (!prompt || typeof prompt !== 'string') {
+    throw new Error('Prompt must be a non-empty string');
+  }
+  
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    throw new Error(`Prompt exceeds maximum allowed length of ${MAX_PROMPT_LENGTH} characters`);
+  }
+  
+  if (/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/.test(prompt)) {
+    throw new Error('Prompt contains invalid control characters');
+  }
+  
+  if (conversationId !== undefined) {
+    if (typeof conversationId !== 'string') {
+      throw new Error('Conversation ID must be a string');
+    }
+    
+    if (conversationId.length > MAX_CONVERSATION_ID_LENGTH) {
+      throw new Error(`Conversation ID exceeds maximum allowed length of ${MAX_CONVERSATION_ID_LENGTH} characters`);
+    }
+    
+    if (/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/.test(conversationId)) {
+      throw new Error('Conversation ID contains invalid control characters');
+    }
+  }
+}
+
 // Define the ChatGPT tool
 const CHATGPT_TOOL: Tool = {
   name: "chatgpt",
@@ -79,27 +122,36 @@ async function checkChatGPTAccess(): Promise<boolean> {
 
 // Function to send a prompt to ChatGPT
 async function askChatGPT(prompt: string, conversationId?: string): Promise<string> {
+  // Validate inputs before processing
+  validateChatGPTInput(prompt, conversationId);
+  
   await checkChatGPTAccess();
   
   try {
-    // This is a simplistic approach - actual implementation may need to be more sophisticated
-    const result = await runAppleScript(`
+    let script = `
       tell application "ChatGPT"
         activate
         delay 1
         
         tell application "System Events"
           tell process "ChatGPT"
-            ${conversationId ? `
-            -- Try to find and click the specified conversation
+    `;
+    
+    if (conversationId) {
+      script += `
+            -- Try to find and click the specified conversation using safe escaping
             try
-              click button "${conversationId}" of group 1 of group 1 of window 1
+              set targetConversation to ${escapeForAppleScript(conversationId)}
+              click button whose name contains targetConversation of group 1 of group 1 of window 1
               delay 1
             end try
-            ` : ''}
-            
-            -- Type in the prompt
-            keystroke "${prompt.replace(/"/g, '\\"')}"
+      `;
+    }
+    
+    script += `
+            -- Type in the prompt with proper escaping
+            set promptText to ${escapeForAppleScript(prompt)}
+            keystroke promptText
             delay 0.5
             keystroke return
             delay 5  -- Wait for response, adjust as needed
@@ -116,7 +168,9 @@ async function askChatGPT(prompt: string, conversationId?: string): Promise<stri
           end tell
         end tell
       end tell
-    `);
+    `;
+    
+    const result = await runAppleScript(script);
     
     return result;
   } catch (error) {
